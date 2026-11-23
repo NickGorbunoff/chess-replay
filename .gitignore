@@ -1,0 +1,33 @@
+node_modules/
+dist/
+src/generated/
+.env
+build/
+coverage/
+*.tsbuildinfo
+
+# Local environment files and credentials
+.env.*
+!.env.example
+.npmrc
+secrets/
+*.key
+*.pem
+*.p12
+*.pfx
+
+# Local database data and dumps (Compose uses a Docker-managed named volume)
+postgres-data/
+pgdata/
+*.sql.gz
+*.dump
+*.sqlite
+*.sqlite3
+
+# Local temporary files and logs
+tmp/
+temp/
+.cache/
+*.tmp
+*.log
+.DS_Store
