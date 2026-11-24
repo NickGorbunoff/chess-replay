@@ -12,7 +12,9 @@
     "build": "tsc",
     "start": "node --env-file-if-exists=.env dist/main.js",
     "pretest": "npm run build",
-    "test": "node --test test/health.test.js"
+    "test": "node --test test/health.test.js",
+    "pretest:integration": "docker compose up -d --wait postgres-test && npm run build",
+    "test:integration": "node --env-file-if-exists=.env --test test/games.integration.test.js"
   },
   "dependencies": {
     "@nestjs/common": "12.6.0",

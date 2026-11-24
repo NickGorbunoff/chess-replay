@@ -10,6 +10,7 @@ Install Node.js 24 LTS and Docker with Compose. If you use nvm, run `nvm install
 cp .env.example .env
 npm ci
 docker compose up -d --wait
+npx prisma migrate deploy
 npm run build
 npm start
 ```
@@ -34,4 +35,30 @@ npm run prisma:validate
 npm test
 ```
 
-`npm test` generates the Prisma client, compiles TypeScript, and exercises the HTTP endpoint with a stubbed database check. The live curl check above verifies the actual Prisma connection. The Prisma schema currently contains only its generator and datasource so setup requires no migrations.
+`npm test` generates the Prisma client, compiles TypeScript, and exercises the HTTP endpoint with a stubbed database check. The live curl check above verifies the actual Prisma connection.
+
+### PostgreSQL integration tests
+
+```sh
+npm ci
+npm run test:integration
+```
+
+The npm command starts the dedicated `postgres-test` Compose service, waits for it to be ready, builds the app, and runs the tests. The service uses temporary storage on a separate PostgreSQL instance. It can run alongside the app database or on its own.
+
+- `TEST_DATABASE_URL` is required. Copy its value from `.env.example` into your existing `.env` or export it in your shell before running the command. The Compose maintenance connection is `postgresql://chessreplay_test:chessreplay_test@127.0.0.1:55432/chessreplay_test_admin`. A shell value takes precedence over `.env`.
+- Before connecting, the tests require the test host and port, test role, and maintenance database shown above. Each run creates a uniquely named `chessreplay_test_<id>` database on that instance, points Prisma migrations and the Nest test app at it, and drops only that database on teardown.
+- `DATABASE_URL` remains the app's connection setting. The test process replaces it with the temporary database URL before running migrations or initializing Nest.
+
+To stop only the test service:
+
+```sh
+docker compose stop postgres-test
+```
+
+## Game persistence
+
+- Prisma generates an internal UUID for each game. PostgreSQL stores it as a native UUID primary key. External game IDs are text because their format depends on the provider.
+- For Chess.com imports, the future adapter will prefer the normalized game UUID. When the UUID is missing, the planned fallback is `url:` followed by the canonical Chess.com game URL, with the query and fragment removed. The repository takes the final external ID as input. If a record later gains a UUID, resolving the earlier URL-based identity is a separate importer concern.
+- The unique index on `(provider, externalGameId)` enforces one row per source identity. A check followed by an insert would allow two callers to observe the same missing row. The repository issues an insert with PostgreSQL's `ON CONFLICT DO NOTHING` behavior and returns the inserted row when it wins.
+- When an insert conflicts with a concurrent import, PostgreSQL resolves the conflict first. The repository reads the stored row in a separate statement so it can see the committed winner. Duplicate requests return that row with its original PGN, metadata, and timestamps. If the winning write rolls back, a competing insert can succeed.

@@ -1,0 +1,15 @@
+[Event "Rapid rated game"]
+[Site "https://example.test/games/live/123456789"]
+[Date "2026.11.22"]
+[Round "-"]
+[White "maple_knight"]
+[Black "river_bishop"]
+[Result "1-0"]
+[WhiteElo "1132"]
+[BlackElo "1098"]
+[TimeControl "600+5"]
+[Termination "maple_knight won by checkmate"]
+
+1. e4 {[%clk 0:10:05]} e5 {[%clk 0:10:03]} 2. Bc4 Nc6
+3. Qh5 Nf6?? {Black attacks the queen and overlooks f7.}
+4. Qxf7# 1-0
