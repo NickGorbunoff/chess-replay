@@ -7,3 +7,18 @@ generator client {
 datasource db {
   provider = "postgresql"
 }
+
+model Game {
+  id             String   @id @default(uuid()) @db.Uuid
+  provider       String
+  externalGameId String
+  sourceUrl      String
+  pgn            String   @db.Text
+  whiteUsername  String
+  blackUsername  String
+  endedAt        DateTime @db.Timestamptz(3)
+  createdAt      DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt      DateTime @updatedAt @db.Timestamptz(3)
+
+  @@unique([provider, externalGameId])
+}

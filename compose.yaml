@@ -14,5 +14,21 @@ services:
       interval: 2s
       timeout: 3s
       retries: 15
+  postgres-test:
+    image: postgres:18
+    profiles: [test]
+    environment:
+      POSTGRES_USER: chessreplay_test
+      POSTGRES_PASSWORD: chessreplay_test
+      POSTGRES_DB: chessreplay_test_admin
+    ports:
+      - '127.0.0.1:55432:5432'
+    tmpfs:
+      - /var/lib/postgresql
+    healthcheck:
+      test: ['CMD', 'pg_isready', '-h', '127.0.0.1', '-U', 'chessreplay_test', '-d', 'chessreplay_test_admin']
+      interval: 2s
+      timeout: 3s
+      retries: 15
 volumes:
   postgres-data:
