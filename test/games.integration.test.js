@@ -51,6 +51,7 @@ before(async () => {
   await admin.connect();
   await admin.query(`CREATE DATABASE "${databaseName}"`);
   databaseCreated = true;
+  await admin.query(`ALTER DATABASE "${databaseName}" SET TimeZone = 'Europe/Warsaw'`);
   process.env.DATABASE_URL = databaseUrl.toString();
   migrate(databaseUrl);
 
@@ -120,26 +121,22 @@ test('ignores stored IDs and timestamps when inserting under a new source key', 
   assert.deepEqual(metadata, game('new-source'));
 });
 
-test('migrations and Nest persist games in the same non-default schema', async () => {
-  const schemaUrl = new URL(databaseUrl);
-  schemaUrl.searchParams.set('schema', 'replay');
-  migrate(schemaUrl);
+test('persists the original endedAt instant when the database defaults to Warsaw time', async (t) => {
+  const verifier = new pg.Client({ connectionString: databaseUrl.toString() });
+  t.after(() => verifier.end());
+  await verifier.connect();
+  const { rows: [settings] } = await verifier.query('SHOW TimeZone');
+  assert.equal(settings.TimeZone, 'Europe/Warsaw');
 
-  let schemaApp;
-  try {
-    process.env.DATABASE_URL = schemaUrl.toString();
-    schemaApp = await NestFactory.createApplicationContext(AppModule, { logger: false, abortOnError: false });
-    const schemaRepository = schemaApp.get(GamesRepository);
-    const schemaClient = schemaApp.get(DatabaseService).client;
-    const input = game('custom-schema');
-    const stored = await schemaRepository.insertIfAbsent(input);
-    assert.deepEqual(await schemaRepository.insertIfAbsent({ ...input, pgn: 'duplicate' }), stored);
-    assert.deepEqual(await schemaClient.game.findUniqueOrThrow({ where: { id: stored.id } }), stored);
-    assert.equal(await client.game.count({ where: { externalGameId: input.externalGameId } }), 0);
-  } finally {
-    process.env.DATABASE_URL = databaseUrl.toString();
-    await schemaApp?.close();
-  }
+  const input = game('timezone-regression');
+  const stored = await repository.insertIfAbsent(input);
+  assert.deepEqual(stored.endedAt, input.endedAt);
+
+  const { rows: [persisted] } = await verifier.query(
+    'SELECT (extract(epoch from "endedAt") * 1000)::bigint AS epoch_ms FROM public."Game" WHERE "id" = $1',
+    [stored.id],
+  );
+  assert.equal(persisted.epoch_ms, String(input.endedAt.getTime()));
 });
 
 async function waitForBlockedInsert(blockerPid) {
@@ -215,7 +212,11 @@ for (const outcome of ['COMMIT', 'ROLLBACK']) {
 test('PostgreSQL rejects duplicate source identities and permits the same ID for another provider', async () => {
   const input = game('composite-key');
   const first = await client.game.create({ data: input });
-  await assert.rejects(client.game.create({ data: input }), { code: 'P2002' });
+  await assert.rejects(client.game.create({ data: input }), (error) => {
+    assert.equal(error.code, 'P2002');
+    assert.equal(error.meta?.driverAdapterError?.cause?.constraint?.index, 'Game_provider_externalGameId_key');
+    return true;
+  });
 
   const second = await repository.insertIfAbsent({ ...input, provider: 'test-provider' });
   assert.notEqual(second.id, first.id);
@@ -226,7 +227,11 @@ test('PostgreSQL independently enforces the primary key and required PGN', async
   const first = await repository.insertIfAbsent(game('primary-key'));
   await assert.rejects(
     client.game.create({ data: { ...game('other-source'), id: first.id } }),
-    { code: 'P2002' },
+    (error) => {
+      assert.equal(error.code, 'P2002');
+      assert.equal(error.meta?.driverAdapterError?.cause?.constraint?.index, 'Game_pkey');
+      return true;
+    },
   );
   await assert.rejects(
     client.$executeRaw`UPDATE "Game" SET "pgn" = NULL WHERE "id" = ${first.id}::uuid`,

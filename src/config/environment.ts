@@ -16,6 +16,5 @@ export function readEnvironment(env: NodeJS.ProcessEnv = process.env) {
     throw new Error('DATABASE_URL must be a PostgreSQL URL with a host and database name');
   }
 
-  const databaseSchema = parsedUrl.searchParams.get('schema') ?? 'public';
-  return { port, databaseUrl, databaseSchema };
+  return { port, databaseUrl };
 }
