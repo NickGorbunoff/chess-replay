@@ -5,6 +5,7 @@ import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { after, before, test } from 'node:test';
+import { setTimeout as delay } from 'node:timers/promises';
 import { NestFactory } from '@nestjs/core';
 import pg from 'pg';
 import { AppModule } from '../dist/app.module.js';
@@ -39,14 +40,19 @@ let app;
 let repository;
 let client;
 
+function migrate(url) {
+  execFileSync(process.execPath, ['node_modules/prisma/build/index.js', 'migrate', 'deploy'], {
+    env: { ...process.env, DATABASE_URL: url.toString() },
+    stdio: 'inherit',
+  });
+}
+
 before(async () => {
   await admin.connect();
   await admin.query(`CREATE DATABASE "${databaseName}"`);
   databaseCreated = true;
   process.env.DATABASE_URL = databaseUrl.toString();
-  execFileSync(process.execPath, ['node_modules/prisma/build/index.js', 'migrate', 'deploy'], {
-    stdio: 'inherit',
-  });
+  migrate(databaseUrl);
 
   app = await NestFactory.createApplicationContext(AppModule, { logger: false, abortOnError: false });
   repository = app.get(GamesRepository);
@@ -98,18 +104,113 @@ test('duplicate imports return the existing row without changing it', async () =
   assert.equal(await client.game.count({ where: { externalGameId: input.externalGameId } }), 1);
 });
 
-test('concurrent imports converge on one row and return the winner', async () => {
-  const input = game('concurrent');
-  const results = await Promise.all(
-    Array.from({ length: 12 }, (_, index) =>
-      repository.insertIfAbsent({ ...input, sourceUrl: input.sourceUrl + '?attempt=' + index }),
-    ),
-  );
-  const rows = await client.game.findMany({ where: { externalGameId: input.externalGameId } });
+test('ignores stored IDs and timestamps when inserting under a new source key', async () => {
+  const stored = await repository.insertIfAbsent(game('original-source'));
+  const oldTimestamp = new Date('2000-01-01T00:00:00Z');
+  const { id, createdAt, updatedAt, ...metadata } = await repository.insertIfAbsent({
+    ...stored,
+    externalGameId: 'new-source',
+    createdAt: oldTimestamp,
+    updatedAt: oldTimestamp,
+  });
 
-  assert.equal(rows.length, 1);
-  for (const result of results) assert.deepEqual(result, rows[0]);
+  assert.notEqual(id, stored.id);
+  assert.ok(createdAt > oldTimestamp);
+  assert.ok(updatedAt > oldTimestamp);
+  assert.deepEqual(metadata, game('new-source'));
 });
+
+test('migrations and Nest persist games in the same non-default schema', async () => {
+  const schemaUrl = new URL(databaseUrl);
+  schemaUrl.searchParams.set('schema', 'replay');
+  migrate(schemaUrl);
+
+  let schemaApp;
+  try {
+    process.env.DATABASE_URL = schemaUrl.toString();
+    schemaApp = await NestFactory.createApplicationContext(AppModule, { logger: false, abortOnError: false });
+    const schemaRepository = schemaApp.get(GamesRepository);
+    const schemaClient = schemaApp.get(DatabaseService).client;
+    const input = game('custom-schema');
+    const stored = await schemaRepository.insertIfAbsent(input);
+    assert.deepEqual(await schemaRepository.insertIfAbsent({ ...input, pgn: 'duplicate' }), stored);
+    assert.deepEqual(await schemaClient.game.findUniqueOrThrow({ where: { id: stored.id } }), stored);
+    assert.equal(await client.game.count({ where: { externalGameId: input.externalGameId } }), 0);
+  } finally {
+    process.env.DATABASE_URL = databaseUrl.toString();
+    await schemaApp?.close();
+  }
+});
+
+async function waitForBlockedInsert(blockerPid) {
+  // Leave time to finish the transaction before the app's 2-second statement timeout.
+  const deadline = performance.now() + 1_200;
+  do {
+    const { rowCount } = await admin.query(
+      `SELECT pid
+       FROM pg_stat_activity
+       WHERE datname = $1
+         AND state = 'active'
+         AND query ~ '^[[:space:]]*INSERT INTO'
+         AND $2::integer = ANY(pg_blocking_pids(pid))`,
+      [databaseName, blockerPid],
+    );
+    if (rowCount > 0) return;
+    await delay(10);
+  } while (performance.now() < deadline);
+  assert.fail('PostgreSQL did not report the repository INSERT waiting for the first transaction');
+}
+
+for (const outcome of ['COMMIT', 'ROLLBACK']) {
+  test(`a blocked import handles a competing ${outcome}`, async () => {
+    const input = game(`concurrent-${outcome.toLowerCase()}`);
+    const competingInput = { ...input, pgn: input.pgn + '\n' };
+    const blocker = new pg.Client({ connectionString: databaseUrl.toString(), connectionTimeoutMillis: 2_000 });
+    let pending;
+    try {
+      await blocker.connect();
+      const { rows: [{ pid }] } = await blocker.query('SELECT pg_backend_pid() AS pid');
+      await blocker.query('BEGIN');
+      const { rows: [first] } = await blocker.query(
+        `INSERT INTO public."Game" (
+          "id", "provider", "externalGameId", "sourceUrl", "pgn",
+          "whiteUsername", "blackUsername", "endedAt", "updatedAt"
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, CURRENT_TIMESTAMP)
+        RETURNING *`,
+        [randomUUID(), input.provider, input.externalGameId, input.sourceUrl, input.pgn,
+          input.whiteUsername, input.blackUsername, input.endedAt],
+      );
+
+      pending = repository.insertIfAbsent(competingInput);
+      // Attach a handler while polling. Await the original promise to surface any error.
+      pending.catch(() => {});
+      await waitForBlockedInsert(pid);
+      await blocker.query(outcome);
+
+      const stored = await pending;
+      if (outcome === 'COMMIT') {
+        assert.deepEqual(stored, first);
+      } else {
+        const { id, createdAt, updatedAt, ...metadata } = stored;
+        assert.notEqual(id, first.id);
+        assert.deepEqual(metadata, competingInput);
+      }
+
+      const rows = await client.game.findMany({
+        where: { provider: input.provider, externalGameId: input.externalGameId },
+      });
+      assert.deepEqual(rows, [stored]);
+    } finally {
+      // Closing the connection rolls back any transaction left open by a failed assertion.
+      try {
+        await blocker.end();
+      } finally {
+        await pending?.catch(() => {});
+      }
+    }
+  });
+}
 
 test('PostgreSQL rejects duplicate source identities and permits the same ID for another provider', async () => {
   const input = game('composite-key');

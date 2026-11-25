@@ -5,13 +5,16 @@ import { PrismaClient } from '../generated/prisma/client.js';
 
 @Injectable()
 export class DatabaseService implements OnModuleDestroy {
+  private readonly environment = readEnvironment();
+  readonly schema = this.environment.databaseSchema;
+
   readonly client = new PrismaClient({
     adapter: new PrismaPg({
-      connectionString: readEnvironment().databaseUrl,
+      connectionString: this.environment.databaseUrl,
       connectionTimeoutMillis: 2_000,
       query_timeout: 2_000,
       statement_timeout: 2_000,
-    }),
+    }, { schema: this.schema }),
   });
 
   async ping(): Promise<void> {

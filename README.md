@@ -23,7 +23,7 @@ curl --fail-with-body http://localhost:3000/health
 
 A ready instance returns HTTP 200 and `{"status":"ok","database":"up"}`. Each check executes `SELECT 1` through Prisma. A failed check returns HTTP 503 and `{"status":"unavailable","database":"down"}`. The app can recover after PostgreSQL comes back without an app restart.
 
-The Compose credentials are local defaults. PostgreSQL is published on loopback port 5432 and uses a named volume. Set `PORT` in `.env` to change the API port. If port 5432 is occupied, change the host port in `compose.yaml` and match it in `DATABASE_URL`.
+The Compose credentials are local defaults. PostgreSQL is published on loopback port 5432 and uses a named volume. Set `PORT` in `.env` to change the API port. If port 5432 is occupied, change the host port in `compose.yaml` and match it in `DATABASE_URL`. To use a different PostgreSQL schema, add `?schema=replay` to `DATABASE_URL` before applying migrations and starting the app. The default schema is `public`.
 
 Use Ctrl+C to stop the API, then run `docker compose down` to stop PostgreSQL. The named volume persists across restarts.
 
@@ -58,7 +58,7 @@ docker compose stop postgres-test
 
 ## Game persistence
 
-- Prisma generates an internal UUID for each game. PostgreSQL stores it as a native UUID primary key. External game IDs are text because their format depends on the provider.
+- The repository generates an internal UUID for each inserted game. PostgreSQL stores it as a native UUID primary key. External game IDs are text because their format depends on the provider.
 - For Chess.com imports, the future adapter will prefer the normalized game UUID. When the UUID is missing, the planned fallback is `url:` followed by the canonical Chess.com game URL, with the query and fragment removed. The repository takes the final external ID as input. If a record later gains a UUID, resolving the earlier URL-based identity is a separate importer concern.
-- The unique index on `(provider, externalGameId)` enforces one row per source identity. A check followed by an insert would allow two callers to observe the same missing row. The repository issues an insert with PostgreSQL's `ON CONFLICT DO NOTHING` behavior and returns the inserted row when it wins.
+- The unique index on `(provider, externalGameId)` enforces one row per source identity. A check followed by an insert would allow two callers to observe the same missing row. The repository uses `ON CONFLICT (provider, "externalGameId") DO NOTHING` and returns the inserted row when it wins.
 - When an insert conflicts with a concurrent import, PostgreSQL resolves the conflict first. The repository reads the stored row in a separate statement so it can see the committed winner. Duplicate requests return that row with its original PGN, metadata, and timestamps. If the winning write rolls back, a competing insert can succeed.
